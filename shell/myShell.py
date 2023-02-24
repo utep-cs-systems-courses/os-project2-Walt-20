@@ -1,18 +1,26 @@
-import os
-import sys
-import re
-
 import os, sys, re
 
 def prompt():
     # get PS1 or give it default
-    return os.getcwd() + " "
+    path = os.getcwd()
+    os.environ["PS1"] = f"myshell:{path}$ "
+    return os.environ.get('PS1')
 
 def execute_cmd(cmd):
     # get the process id
     pid = os.fork()
     # get the process id, check if it is a cmd
     if pid == 0:
+        if '>' in cmd:
+            idx = cmd.index('>')
+            fd_out = os.open(cmd[idx + 1], os.O_CREAT | os.O_WRONLY)
+            os.dup2(fd_out, sys.stdout.fileno())
+            cmd = cmd[:idx]
+        if '<' in cmd:
+            idx = cmd.index('<')
+            fd_in = os.open(cmd[idx + 1], os.O_RDONLY)
+            os.dup2(fd_in, sys.stdin.fileno())
+            cmd = cmd[:idx]
         try:
             os.execve(cmd[0], cmd, os.environ)
         except FileNotFoundError:
@@ -27,45 +35,85 @@ def execute_cmd(cmd):
             sys.exit()
 
 def change_directory(args):
-    try:
-       pwd = os.chdir(args[0])
-       prompt(pwd)
-    except:
-        sys.stderr.write(f"{args[0]}: No such file or directory\n")
+    # takes us to home directory
+    if not args:
+        os.chdir(os.path.expanduser("~"))
+        return
+    # takes us to parent directory
+    cwd = os.getcwd()
+    if args[0] == "..":
+        os.chdir(os.path.abspath(os.path.join(cwd, os.pardir)))
+    else:
+        try:
+            path = " ".join(args)
+            os.chdir(path)
+        except:
+            sys.stderr.write(f"{path}: No such file or directory\n")
 
 def list_directory():
-    dirs = os.listdir('.')
-    sys.stdout.write("\n".join(dirs) + "\n")      
+    # get current directory and then get it's paths
+    cwd = os.getcwd()
+    paths = os.listdir(cwd)
+    # create two lists that hold the directories in that path and files
+    # exclude the hidden ones
+    dirs = [d for d in paths if os.path.isdir(os.path.join(cwd, d)) and not d.startswith(".")]
+    files = [f for f in paths if os.path.isfile(os.path.join(cwd, f)) and not f.startswith(".")]
+    count = 0
+    # iterate through the dirs list and print six to a line
+    for d in dirs:
+        if count == 6:
+            sys.stdout.write("\n")
+            count = 0
+        sys.stdout.write(f"{d} ")
+        count+=1
+    if count > 0:
+        sys.stdout.write("\n")
+    # iterate through the files list and print six to a line
+    for f in files:
+        if count == 6:
+            sys.stdout.write("\n")
+            count = 0
+        sys.stdout.write(f"{f} ")
+        count+=1
+    if count > 0:
+        sys.stdout.write("\n")
+
 
 def execute_pipeline(pipeline):
-    # creating a list append cmds to said list
-    pipe_fds = []
-    for i in range(len(pipeline)):
-        r, w = os.pipe()
-        pipe_fds.append(r)
-        pipe_fds.append(w)
-        # check if current process is a child process
-        if os.fork() == 0:
-            # if it is a child process
-            if i != 0:
-                # duplicate the read-end of the pipe to the stdin file descriptor
-                os.dup2(pipe_fds[i*2-2], sys.stdin.fileno())
-            # if it is not the index of the last cmd
-            if i != len(pipeline) - 1:
-                # redirect the output of the current cmd to the write end of the pipe
-                # connecting the input of hte next cmd in the pipeline
-                os.dup2(pipe_fds[i*2+1], sys.stdout.fileno())
-            # close all file descriptors
-            for fd in pipe_fds:
-                os.close(fd)
-            # pass the current pipeline cmd to execute_cmd function
-            execute_cmd(pipeline[i])
-    # close file descriptors
-    for fd in pipe_fds:
-        os.close(fd)
-    # wait on child
-    for i in range(len(pipeline)):
-        os.wait()
+    # Create a pipe for each command in the pipeline
+    pipes = [os.pipe() for _ in range(len(pipeline) - 1)]
+    
+    # Create child processes for each command in the pipeline
+    pids = []
+    for i, cmd in enumerate(pipeline):
+        pid = os.fork()
+        if pid == 0:
+            # If this is not the first command, redirect stdin to the read end of the previous pipe
+            if i > 0:
+                os.dup2(pipes[i - 1][0], 0)
+            
+            # If this is not the last command, redirect stdout to the write end of the next pipe
+            if i < len(pipeline) - 1:
+                os.dup2(pipes[i][1], 1)
+            
+            # Close all file descriptors
+            for p in pipes:
+                os.close(p[0])
+                os.close(p[1])
+            
+            # Execute the command
+            os.execvp(cmd[0], cmd)
+        
+        pids.append(pid)
+    
+    # Close all file descriptors
+    for p in pipes:
+        os.close(p[0])
+        os.close(p[1])
+    
+    # Wait for all child processes to finish
+    for pid in pids:
+        os.waitpid(pid, 0)    
 
 def execute_background_task(cmd):
     pid = os.fork()
